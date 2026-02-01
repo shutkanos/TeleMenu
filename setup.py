@@ -1,4 +1,4 @@
-from setuptools import setup, find_packages
+from setuptools import setup
 
 from codecs import open
 from os import path
@@ -16,7 +16,8 @@ setup(
     version='3.0',
     description='Telegramm menu system',
     long_description=long_description,
-    url='https://github.com/shutkanos',
+    long_description_content_type='text/markdown',
+    url='https://github.com/shutkanos/TeleMenu',
 
     author='Shutkanos',
     author_email='Shutkanos836926@mail.ru',
@@ -24,16 +25,14 @@ setup(
     license='MIT',
 
     classifiers=[
-        #   4 - Beta
-        #   5 - Production/Stable
         'Development Status :: 4 - Beta',
         'Intended Audience :: Developers',
         'License :: OSI Approved :: MIT License',
         'Programming Language :: Python :: 3',
     ],
 
-    keywords='telegramm menu telemenu tele_menu telegramm_menu tg_menu',
-    packages=find_packages(),
+    keywords=" ".join(["telegram menu telemenu tele_menu telegram_menu tg_menu tg scene scenes tools telebot telegram_bot pytelegrambotapi"]),
+    packages=['tele_menu'],
 
     install_requires=required,
 
