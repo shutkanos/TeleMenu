@@ -1,27 +1,48 @@
-import functools, datetime
+import functools
+import datetime
+import time
 
-import tele_menu
-from tele_menu.logger import Log
-from tele_menu.data import Data
+import db_attribute
+import telebot
+
+from .logger import Log
+from .data import Data
+from . import scenes
+
+def bot_register(bot: telebot.TeleBot):
+    Data.bot = bot
+    register_handlers(bot)
+
+def sql_register(host="127.0.0.1", user="", password="", database=None):
+    Log.debug(title="sql register", msg=f"{host=} {user=} password=*** {database=}")
+    Data.sql_config = dict(host=host, user=user, password=password, database=database)
+    Data.connect_object = db_attribute.connector.Connection(**Data.sql_config)
+    db_work_obj = db_attribute.db_work.Db_work(Data.connect_object)
+    Data.User.register_dbworkobj(db_work_obj)
+    Data.BanUsers.loaded()
 
 def allmesege(func=None, /, ThisCall=False, MinRank='User', Logging=True, RankForLogging='User'):
     def actual_decorator(func):
         @functools.wraps(func)
         def allmesege_decor(mess):
-            user = Data.User.get(mess.from_user.id)
+            user_id = mess.from_user.id
+            if Data.BanUsers.check_ban(user_id):
+                return
+
+            user = Data.User.get(user_id)
             if user is None or user.tgUsername == "":
-                user = Data.User(id=mess.from_user.id,
+                user = Data.User(id=user_id,
                                  nameuser=(mess.from_user.first_name if mess.from_user.first_name else mess.from_user.username),
                                  tgUsername = mess.from_user.username,
                                  registerData = datetime.datetime.now())
 
-            #if user.ban or AntiSpam(user, mess, ThisCall): return
+            if Data.BanUsers.deep_cheak_ban(user_id) or Antiddos(user, mess, ThisCall): return
 
             text = eval("mess.data" if ThisCall else "mess.text")
 
             if not ThisCall:
                 try:
-                    Data.bot.delete_message(mess.from_user.id, mess.id)
+                    Data.bot.delete_message(user_id, mess.id)
                 except:
                     pass
 
@@ -39,13 +60,36 @@ def allmesege(func=None, /, ThisCall=False, MinRank='User', Logging=True, RankFo
         return actual_decorator
     return actual_decorator(func)
 
+def Antiddos(user, mess, ThisCall):
+    numMessagesPerSec = user.numMessagesPerSec
+    timer, count = numMessagesPerSec // 1000, numMessagesPerSec % 1000
+    if timer != int(time.time()) // 10:
+        timer = int(time.time()) // 10
+        count = 1
+    else:
+        count += 1
+    Log.info(f"{user}")
+    if count >= 10:
+        Data.BanUsers.ban(user.id, timestamp=int(time.time()) + 10*60, which=1, text="banned by antiddos system")
+        return True
+    user.numMessagesPerSec = timer * 1000 + count
+    return False
+
 def register_handlers(bot):
     @bot.message_handler(commands=['start'])
     @allmesege
     def CommandStart(message, text, user):
         user.clear_scene()
         user.set_scene("main_menu")
-        user.current_scene.send()
+
+    @bot.message_handler(func=lambda message: True)
+    @allmesege
+    def messages(message, text, user):
+        try:
+            user_scene: scenes.Scene = user.current_scene
+        except:
+            return
+        user_scene.input(text)
 
     @bot.callback_query_handler(func=lambda call: call.data.split('|')[0] == "tele_menu")
     @allmesege(ThisCall=True)
@@ -56,7 +100,7 @@ def register_handlers(bot):
             bot.answer_callback_query(call.id, text="Error, try send /start")
             return
         user_id, scene_id, message_num, button_i, button_j = map(int, temp)
-        user_scene: tele_menu.scenes.Scene = user.current_scene
+        user_scene: scenes.Scene = user.current_scene
         if user.id != user_id or user_scene.id != scene_id:
             bot.answer_callback_query(call.id, text="Error, try send /start")
             return
