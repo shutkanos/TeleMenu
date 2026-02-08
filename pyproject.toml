@@ -25,9 +25,8 @@ keywords = [
 ]
 dependencies = [
     "pyTelegramBotAPI",
-    "db_attribute",
     "sortedcontainers",
-    "git+https://github.com/shutkanos/Db-Attribute.git"
+    "db-attribute"
 ]
 requires-python = ">=3.9"
 
