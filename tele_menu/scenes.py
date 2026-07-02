@@ -8,6 +8,7 @@ from db_attribute import db_class
 
 import tele_menu
 from .data import Data
+from .memory_storage import MemoryMedia
 
 effects_ids = {
     '🔥': "5104841245755180586",
@@ -17,6 +18,7 @@ effects_ids = {
     '🎉': "5046509860389126442",
     '💩': "5046589136895476101"
 }
+
 
 class BaseManager:
     _registry: Optional[Dict[str, Type]] = None
@@ -70,11 +72,14 @@ class BaseManager:
     @classmethod
     def decorator_register(cls, target_class=None, /, **kwargs):
         is_direct_call = target_class is not None and inspect.isclass(target_class)
+
         def wrapper(cls_obj: Type) -> Type:
             return cls.register(cls_obj, **kwargs)
+
         if is_direct_call:
             return wrapper(target_class)
         return wrapper
+
 
 class BaseAction:
     type: str = 'base'
@@ -94,11 +99,13 @@ class BaseAction:
             raise Exception("Use the ActionManager Class to call 'restore_from_dict'")
         return cls(json_data.get('ta', None))
 
+
 class ActionManager(BaseManager):
     @classmethod
     def restore_from_dict(cls, json_data):
         action_cls: BaseAction = cls.get(json_data.get('t', None))
         return action_cls.from_dict(json_data)
+
 
 @ActionManager.decorator_register(type='SendScene')
 class SendSceneAction(BaseAction):
@@ -120,6 +127,7 @@ class SendSceneAction(BaseAction):
         if json_data.get('t', None) != cls.type:
             raise Exception("Use the ActionManager Class to call 'restore_from_dict'")
         return cls(scene_name=json_data.get('s', None), context=json_data.get('c', None))
+
 
 @ActionManager.decorator_register(type='CallMethod')
 class CallMethodAction(BaseAction):
@@ -147,6 +155,7 @@ class CallMethodAction(BaseAction):
         if json_data.get('t', None) != cls.type:
             raise Exception("Use the BaseAction Class to call 'from_dict'")
         return cls(method_name=json_data["m"], args=json_data.get("a", None), kwargs=json_data.get("k", None))
+
 
 class OpenMedia:
     def __init__(self, file, mode="rb", encoding=None):
@@ -182,6 +191,7 @@ class Button:
         if action is not None:
             action = ActionManager.restore_from_dict(action)
         return cls(text=data['text'], action=action)
+
 
 class BaseMessage:
     type: str = 'base'
@@ -244,7 +254,7 @@ class BaseMessage:
 
     @classmethod
     def from_dict(cls, json_data):
-        #message_class = MessageManager.get(json_data['type'])
+        # message_class = MessageManager.get(json_data['type'])
         obj = cls(
             content=json_data['content'],
             buttons=[[Button.from_dict(btn) for btn in row] for row in json_data.get('buttons', [])],
@@ -253,11 +263,13 @@ class BaseMessage:
         obj._messages_ids = json_data.get('_messages_ids', [])
         return obj
 
+
 class MessageManager(BaseManager):
     @classmethod
     def restore_from_dict(cls, json_data):
         action_cls: BaseMessage = cls.get(json_data['type'])
         return action_cls.from_dict(json_data)
+
 
 @MessageManager.decorator_register(type="text")
 class TextMessage(BaseMessage):
@@ -317,21 +329,34 @@ class TextMessage(BaseMessage):
         new_message._messages_ids = self._messages_ids
         return True
 
+
 @MessageManager.decorator_register(type="media")
 class MediaMessage(BaseMessage):
     cheak_readble_content: bool = True
+
     def send(self, scene):
         reply_markup = self._create_markup(scene) if self.buttons else None
         send_method = getattr(Data.bot, f'send_{self.type}')
-        content = self.content.create_open() if isinstance(self.content, OpenMedia) else self.content
+
+        if isinstance(self.content, OpenMedia):
+            content = self.content.create_open()
+        elif isinstance(self.content, MemoryMedia):
+            content = self.content.get_data(refresh_ttl=True)
+            if content is None:
+                raise Exception(f"MemoryMedia with id={self.content.media_id} expired or not found")
+        else:
+            content = self.content
+
         msg = send_method(
             chat_id=scene.user.id,
             **{self.type: content},
             reply_markup=reply_markup,
             message_effect_id=self.effect_id
         )
+
         if isinstance(self.content, OpenMedia):
             content.close()
+
         self._messages_ids = [msg.message_id]
 
     def replace(self, scene, new_message):
@@ -342,7 +367,16 @@ class MediaMessage(BaseMessage):
 
         try:
             new_message._messages_ids = self._messages_ids
-            content = new_message.content.create_open() if isinstance(new_message.content, OpenMedia) else new_message.content
+
+            if isinstance(new_message.content, OpenMedia):
+                content = new_message.content.create_open()
+            elif isinstance(new_message.content, MemoryMedia):
+                content = new_message.content.get_data(refresh_ttl=True)
+                if content is None:
+                    raise Exception(f"MemoryMedia with id={new_message.content.media_id} expired or not found")
+            else:
+                content = new_message.content
+
             media = telebot.types.InputMedia(
                 type=self.type,
                 media=content
@@ -352,8 +386,10 @@ class MediaMessage(BaseMessage):
                 message_id=new_message._messages_ids[0],
                 media=media
             )
+
             if isinstance(new_message.content, OpenMedia):
                 content.close()
+
             reply_markup = new_message._create_markup(scene) if new_message.buttons else None
             Data.bot.edit_message_reply_markup(
                 chat_id=scene.user.id,
@@ -379,6 +415,8 @@ class MediaMessage(BaseMessage):
             json_data['content'] = {'type': 'BytesIO', 'data': base64.b64encode(content.read()).decode('utf-8'), 'name': getattr(content, 'name', 'file')}
             content.seek(0)
         elif isinstance(content, OpenMedia):
+            json_data['content'] = content.to_dict()
+        elif isinstance(content, MemoryMedia):
             json_data['content'] = content.to_dict()
         else:
             json_data['content'] = content
@@ -412,6 +450,8 @@ class MediaMessage(BaseMessage):
                     content = bio
                 elif content_type == 'open':
                     content = OpenMedia.from_dict(content_data)
+                elif content_type == 'memory':
+                    content = MemoryMedia.from_dict(content_data)
                 else:
                     content = content_data
             else:
@@ -479,11 +519,13 @@ class ContactMessage(BaseMessage):
         obj.last_name = json_data.get('last_name', "")
         return obj
 
+
 def create_dbscene(scene):
     @db_class.DbClassDecorator(list_of_non_replaceable_methodes=['__setattr__'])
     class DbScene(db_class.DbClass, scene):
         user: Data.User
-        def __init__(self, user, context: Optional[Dict] = None, id:int=None, messages=None, handlers=None, call_build = True, **kwargs):
+
+        def __init__(self, user, context: Optional[Dict] = None, id: int = None, messages=None, handlers=None, call_build=True, **kwargs):
             super().__init__(_call_init=False, **kwargs)
             self.__dict__['id'] = random.randint(1, 10 ** 5) if id is None else id
             self.__dict__['user'] = user
@@ -501,7 +543,7 @@ def create_dbscene(scene):
             return cls(_use_db=True, user=obj.user, context=obj.context,
                        id=obj.id, messages=obj.messages, handlers=obj.handlers,
                        _obj_dbattribute=_obj_dbattribute, _name_attribute=_name_attribute,
-                       _first_container=_first_container,**kwargs)
+                       _first_container=_first_container, **kwargs)
 
         def dumps(self, _return_json=True):
             if _return_json:
@@ -513,8 +555,10 @@ def create_dbscene(scene):
             temp = db_class.DbDict.loads(tempdata['d'])
             user = Data.User.get(tempdata['u']) if tempdata['u'] else Data.EmptyUser
             return cls.__convert_to_db__(cls.from_dict(temp, user))
+
     DbScene.__name__ = f"DbScene_{scene.__name__}"
     db_class.DbClassManager.add_db_class(scene, DbScene)
+
 
 class SceneManager(BaseManager):
     type_attribute: str = "name"
@@ -533,34 +577,58 @@ class SceneManager(BaseManager):
     @classmethod
     def decorator_register(cls, target_class=None, /, name: str = None):
         is_direct_call = target_class is not None and inspect.isclass(target_class)
+
         def wrapper(cls_obj: Type) -> Type:
             return cls.register(cls_obj, name=name)
+
         if is_direct_call:
             return wrapper(target_class)
         return wrapper
+
 
 @SceneManager.decorator_register
 class Scene:
     name: str = "base"
 
-    def __init__(self, user, context: Optional[Dict] = None, id: int = None, messages: List[BaseMessage] = None, handlers: Dict[str, Any] = None, call_build = True):
-        self.id = random.randint(1, 10**5) if id is None else id
+    def __init__(self, user, context: Optional[Dict] = None, id: int = None, messages: List[BaseMessage] = None, handlers: Dict[str, Any] = None, call_build=True):
+        self.id = random.randint(1, 10 ** 5) if id is None else id
         self.user = user
         self.context = {} if context is None else context
         self.messages: List[BaseMessage] = [] if messages is None else messages
         self.handlers: Dict[str, Any] = dict() if handlers is None else handlers
+        self._build_result = None
+
         if call_build:
-            self.build()
+            self._build_result = self.build()
+
         for i in range(len(self.messages)):
             self.messages[i].message_num = i
 
     def __repr__(self):
         return f"{self.name}(id={self.id}, user={self.user}, context={self.context}, messages={self.messages}, handlers={self.handlers})"
 
-    def __get_repr__(self, Objs: set, now: int=0):
-        return f"{self.name}(" + ', '.join([f'{i}=' + (temp.__get_repr__(Objs, now + 1) if hasattr((temp:=getattr(self, i)), '__get_repr__') else repr(temp)) for i in ['id', 'user', 'context', 'messages', 'handlers']]) + ")"
+    def __get_repr__(self, Objs: set, now: int = 0):
+        return f"{self.name}(" + ', '.join([f'{i}=' + (temp.__get_repr__(Objs, now + 1) if hasattr((temp := getattr(self, i)), '__get_repr__') else repr(temp)) for i in ['id', 'user', 'context', 'messages', 'handlers']]) + ")"
 
-    def build(self):
+    def build(self) -> Optional[BaseAction]:
+        """
+        Build the scene content (messages, buttons, handlers, etc.).
+
+        Returns:
+            BaseAction: Action to execute instead of showing this scene (e.g., redirect to another scene).
+                       Use this for simple, declarative redirects.
+            None: Show this scene normally.
+
+        Example:
+            def build(self) -> Optional[BaseAction]:
+                # Quick check - redirect if not authorized
+                if not self.user.nameuser:
+                    return SendSceneAction('registration')
+
+                # Build scene content
+                self.add_message(TextMessage("Welcome!"))
+                return None
+        """
         raise NotImplementedError
 
     def input(self, text):
@@ -573,36 +641,45 @@ class Scene:
         self.messages.extend(messages)
 
     def send(self):
-        if not self.user.previous_scene:
+        temp = self.user.previous_scene
+        if not temp:
             for msg in self.messages:
                 msg.send(self)
             self.user.current_scene = self
             return
 
-        old_messages = self.user.previous_scene.messages
+        old_messages = temp.messages
         new_messages = self.messages
 
-        i = 0
         n_old = len(old_messages)
         n_new = len(new_messages)
 
-        while i < n_old and i < n_new:
-            old_msg = old_messages[i]
-            new_msg = new_messages[i]
+        can_replace_all = (n_old == n_new) and all(
+            self._can_replace(old, new)
+            for old, new in zip(old_messages, new_messages)
+        )
 
-            if not old_msg.replace(self, new_msg):
-                old_msg.delete(self.user.previous_scene)
+        if can_replace_all:
+            for old_msg, new_msg in zip(old_messages, new_messages):
+                old_msg.replace(self, new_msg)
+        else:
+            for old_msg in old_messages:
+                old_msg.delete(temp)
+            for new_msg in new_messages:
                 new_msg.send(self)
-            i += 1
 
-        while i < n_old:
-            old_messages[i].delete(self.user.previous_scene)
-            i += 1
-
-        while i < n_new:
-            new_messages[i].send(self)
-            i += 1
         self.user.current_scene = self
+
+    def _can_replace(self, old_msg: BaseMessage, new_msg: BaseMessage) -> bool:
+        if type(old_msg) != type(new_msg):
+            return False
+        if isinstance(old_msg, TextMessage):
+            old_parts = (len(old_msg.content) + TextMessage.MAX_TEXT_LENGTH - 1) // TextMessage.MAX_TEXT_LENGTH
+            new_parts = (len(new_msg.content) + TextMessage.MAX_TEXT_LENGTH - 1) // TextMessage.MAX_TEXT_LENGTH
+            return old_parts == new_parts
+        if isinstance(old_msg, MediaMessage):
+            return old_msg.type == new_msg.type
+        return False
 
     def to_dict(self) -> Dict[str, Any]:
         temp = {
@@ -612,7 +689,6 @@ class Scene:
             'handlers': self.handlers,
             'context': self.context
         }
-        tele_menu.Log.debug(f"dump scene to dict: {temp}")
         return temp
 
     @classmethod
@@ -621,21 +697,25 @@ class Scene:
             scene_class = Scene
         else:
             scene_class = SceneManager.get(json_data['name'])
-        tele_menu.Log.debug(f"dump scene from dict: {json_data}")
         scene = scene_class.__new__(scene_class)
         scene.id = json_data['id']
         scene.user = user
         scene.context = json_data['context']
         scene.messages = [MessageManager.restore_from_dict(msg) for msg in json_data['messages']]
         scene.handlers = json_data['handlers']
+        scene._build_result = None
+        scene._after_build_called = False
         for i in range(len(scene.messages)):
             scene.messages[i].message_num = i
         return scene
 
+
 class EmptyUser:
     id = 0
+
     def __repr__(self):
         return "UserNotSet"
+
 
 Data.EmptyUser = EmptyUser()
 Data.EmptyScene = Scene(EmptyUser(), call_build=False)

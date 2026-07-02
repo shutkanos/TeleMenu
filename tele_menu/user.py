@@ -2,18 +2,21 @@ import sys
 import time
 import datetime
 import subprocess
-from typing import Dict, Optional
+from typing import Dict, Optional, Type
 
 from db_attribute import DbAttribute, DbAttributeMetaclass
-from db_attribute.db_types import DbField, Id
+from db_attribute.db_types import DbField, Id, DbWorkMarker
 
 from .data import Data
 from .scenes import Scene, SceneManager
+from .logger import Log
+
 
 class BaseMeta:
-    __skip_dbworkobj__ = True
+    __dbworkobj__ = DbWorkMarker('main')
 
-class User(DbAttribute, metaclass=DbAttributeMetaclass):
+
+class UserBase(DbAttribute, metaclass=DbAttributeMetaclass):
     Meta = BaseMeta
     nameuser: str = DbField(default="")
     tgUsername: str = DbField(default="")
@@ -29,11 +32,17 @@ class User(DbAttribute, metaclass=DbAttributeMetaclass):
     # scene module
     current_scene: Scene = DbField(default=Data.EmptyScene, repr=False)
     previous_scene: Scene = DbField(default=Data.EmptyScene, repr=False)
+
     # activeInputFunction: bool = DbField(default=False, repr=False)
 
-    def set_scene(self, scene_name: str, context: Optional[Dict] = None, send_scene = True):
+    def set_scene(self, scene_name: str, context: Optional[Dict] = None, send_scene=True):
         self.previous_scene = self.current_scene
         temp = SceneManager.create_scene(scene_name, self, context)
+
+        if temp._build_result is not None:
+            temp._build_result.activate(self, temp)
+            return temp
+
         self.current_scene = temp
         if send_scene:
             temp.send()
@@ -42,7 +51,28 @@ class User(DbAttribute, metaclass=DbAttributeMetaclass):
     def clear_scene(self):
         self.current_scene = Data.EmptyScene
 
-Data.User = User
+
+def user_register(user_class: Type[UserBase] = None):
+    """
+    Register custom User class.
+
+    Args:
+        user_class: Custom user class that inherits from UserBase.
+                   If None, uses UserBase as default.
+
+    Example:
+        class CustomUser(UserBase):
+            coins: int = DbField(default=0)
+            level: int = DbField(default=1)
+
+        user_register(CustomUser)
+    """
+    if user_class is None:
+        user_class = UserBase
+    Data.User = user_class
+
+
+user_register()
 
 try:
     from timestamp_store import TimestampStore
@@ -53,6 +83,7 @@ except ImportError:
     except Exception:
         from .local_timestamp_store import TimestampStore
 
+
 class BanUsersClass:
     def __init__(self):
         self.store = TimestampStore()
@@ -61,17 +92,15 @@ class BanUsersClass:
 
     def loaded(self):
         self.ban_ids = {i.Id if isinstance(i, Id) else i for i in (Data.User.ban == True).found()}
-        self.store = TimestampStore({i: int(user.unbanTime) for i in self.ban_ids if (user:=User.get(i))})
+        self.store = TimestampStore({i: int(user.unbanTime) for i in self.ban_ids if (user := Data.User.get(i))})
 
     def update(self):
         if self.last_update != time.time():
             removed = self.store.remove_timestamp(int(time.time()))
             if removed:
-                self.ban_ids.difference_update(set(removed))
                 for i in removed:
-                    user = User.get(i)
-                    if user:
-                        user.ban = False
+                    if i in self.ban_ids:
+                        self.unban(i)
             self.last_update = int(time.time())
 
     def check_ban(self, Id):
@@ -106,24 +135,47 @@ class BanUsersClass:
                 return
             user.unbanTime = int(timestamp)
             user.ban = True
-            user.banInfo = {'which': which, 'text': '' if text is None else text, 'start': int(time.time()), 'end': timestamp}
+            user.banInfo = {'which': which, 'text': '' if text is None else text, 'start': int(time.time()),
+                            'end': timestamp}
+
+        Log.info(f"Banning user(id={target_Id}, tgUsername={user.tgUsername}, banInfo={user.banInfo})")
 
         self.store.add(target_Id, timestamp)
         self.ban_ids.add(target_Id)
 
+        try:
+            from .scenes import SceneManager
+            user.set_scene("ban_notification", context={'ban_info': user.banInfo})
+        except Exception as e:
+            Log.error(f"Failed to send ban notification: {e}")
+
     def unban(self, Id):
         if Id not in self.ban_ids:
             return
-        user: User = Data.User.get(Id)
+        user = Data.User.get(Id)
+        Log.info(f"Unbanning user(id={Id}, tgUsername={user.tgUsername})")
+
         temp = user.doDict
         if temp.get('BanSelf', None) is None:
             temp['BanSelf'] = [user.banInfo]
         else:
             temp['BanSelf'].append(user.banInfo)
+
+        ban_info = user.banInfo.copy()
+
         user.ban = False
         user.unbanTime = 0
-        self.store.remove(Id)
-        self.ban_ids.remove(Id)
+
+        if Id in self.store:
+            self.store.remove(Id)
+        self.ban_ids.discard(Id)
+
+        try:
+            from .scenes import SceneManager
+            user.set_scene("unban_notification", context={'ban_info': ban_info})
+        except Exception as e:
+            Log.error(f"Failed to send unban notification: {e}")
+
 
 BanUsers = BanUsersClass()
 Data.BanUsers = BanUsers

@@ -3,6 +3,7 @@ import datetime
 import time
 
 import db_attribute
+from db_attribute.db_types import DbWorkManager
 import telebot
 
 from .logger import Log
@@ -13,12 +14,21 @@ def bot_register(bot: telebot.TeleBot):
     Data.bot = bot
     register_handlers(bot)
 
-def sql_register(host="127.0.0.1", user="", password="", database=None):
-    Log.debug(title="sql register", msg=f"{host=} {user=} password=*** {database=}")
-    Data.sql_config = dict(host=host, user=user, password=password, database=database)
-    Data.connect_object = db_attribute.connector.Connection(**Data.sql_config)
+def sql_register(connector=db_attribute.connector.MySQLConnection, *args, **kwargs):
+    """
+    Connecting to the DB via db_attribute.
+
+    Args:
+        connector: Connector class (default MySQLConnection). * MySQL:
+                   * MySQL: sql_register(host="127.0.0.1", user="root", password="...", database="mybot")
+                   * SQLite: sql_register(connector.SQLiteConnection, path=":memory:")
+        *args, **kwargs: Passed to connector.
+    """
+    Log.debug(title="sql register", msg=f"connector={connector.__name__} {args=} {kwargs=}")
+    Data.sql_config = (args, kwargs)
+    Data.connect_object = connector(*args, **kwargs)
     db_work_obj = db_attribute.db_work.Db_work(Data.connect_object)
-    Data.User.register_dbworkobj(db_work_obj)
+    DbWorkManager.connect('main', db_work_obj)
     Data.BanUsers.loaded()
 
 def allmesege(func=None, /, ThisCall=False, MinRank='User', Logging=True, RankForLogging='User'):
@@ -45,13 +55,13 @@ def allmesege(func=None, /, ThisCall=False, MinRank='User', Logging=True, RankFo
                     Data.bot.delete_message(user_id, mess.id)
                 except:
                     pass
-
-            if Data.Ranks[user.rank] < Data.Ranks[MinRank]:
-                if Data.Ranks[user.rank] > 0:
+            rank = user.rank
+            if Data.Ranks[rank] < Data.Ranks[MinRank]:
+                if Data.Ranks[rank] > 0:
                     Log.info(title='Access is denied. Insufficient rank', msg=f'{user} try to "{text}"')
                 return
 
-            if Logging and Data.Ranks[user.rank] >= Data.Ranks[RankForLogging] or Data.Ranks[MinRank] >= 2:
+            if Logging and Data.Ranks[rank] >= Data.Ranks[RankForLogging] or Data.Ranks[MinRank] >= 2:
                 Log.debug(title='Logging mess', msg=f'msg "{text}" from {user}')
 
             func(mess, text, user)
@@ -68,7 +78,6 @@ def Antiddos(user, mess, ThisCall):
         count = 1
     else:
         count += 1
-    Log.info(f"{user}")
     if count >= 10:
         Data.BanUsers.ban(user.id, timestamp=int(time.time()) + 10*60, which=1, text="banned by antiddos system")
         return True
