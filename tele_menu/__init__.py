@@ -13,4 +13,4 @@ __all__ = ["effects_ids", "bot_register", "sql_register", "User", "UserBase", "u
            "BaseMessage", "TextMessage", "MediaMessage", "PhotoMessage", "VideoMessage", "AnimationMessage", "DocumentMessage", "AudioMessage", "ContactMessage",
            "MemoryMedia", "MemoryMediaStorage", "OpenMedia"]
 
-__version__ = '3.0.2'
+__version__ = '3.0.3'

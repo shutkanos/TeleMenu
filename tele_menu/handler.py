@@ -78,7 +78,7 @@ def Antiddos(user, mess, ThisCall):
         count = 1
     else:
         count += 1
-    if count >= 10:
+    if count >= 12:
         Data.BanUsers.ban(user.id, timestamp=int(time.time()) + 10*60, which=1, text="banned by antiddos system")
         return True
     user.numMessagesPerSec = timer * 1000 + count

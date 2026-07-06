@@ -2,6 +2,7 @@ import sys
 import time
 import datetime
 import subprocess
+import traceback
 from typing import Dict, Optional, Type
 
 from db_attribute import DbAttribute, DbAttributeMetaclass
@@ -36,16 +37,20 @@ class UserBase(DbAttribute, metaclass=DbAttributeMetaclass):
     # activeInputFunction: bool = DbField(default=False, repr=False)
 
     def set_scene(self, scene_name: str, context: Optional[Dict] = None, send_scene=True):
-        self.previous_scene = self.current_scene
-        temp = SceneManager.create_scene(scene_name, self, context)
+        try:
+            self.previous_scene = self.current_scene
+            temp = SceneManager.create_scene(scene_name, self, context)
 
-        if temp._build_result is not None:
-            temp._build_result.activate(self, temp)
-            return temp
+            if temp._build_result is not None:
+                temp._build_result.activate(self, temp)
+                return temp
 
-        self.current_scene = temp
-        if send_scene:
-            temp.send()
+            self.current_scene = temp
+            if send_scene:
+                temp.send()
+        except Exception as e:
+            traceback.print_exc()
+            return False
         return temp
 
     def clear_scene(self):

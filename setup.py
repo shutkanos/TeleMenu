@@ -13,7 +13,7 @@ with open('requirements.txt') as f:
 
 setup(
     name='tele_menu',
-    version='3.0.2',
+    version='3.0.3',
     description='Telegramm menu system',
     long_description=long_description,
     long_description_content_type='text/markdown',

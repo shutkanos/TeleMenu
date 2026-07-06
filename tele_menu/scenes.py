@@ -227,8 +227,23 @@ class BaseMessage:
                 tele_menu.Log.error(f"error delete message: {traceback.format_exc()}")
         self._messages_ids = []
 
-    def replace(self, scene, new_message):
+    def replace(self, scene, new_message) -> bool:
+        """
+        Try to edit this message in-place so it becomes new_message.
+
+        Returns:
+            True: the message was successfully synced (edited OR safely left untouched
+                  because content/markup was already identical) - new_message._messages_ids
+                  is guaranteed to hold valid, still-alive message ids.
+            False: could not sync the message in-place (real, unrecoverable API error) -
+                   caller MUST fall back to delete(old) + send(new) itself, since
+                   new_message._messages_ids might not be populated/valid here.
+        """
         raise NotImplementedError
+
+    @staticmethod
+    def _is_not_modified_error(e: "telebot.apihelper.ApiTelegramException") -> bool:
+        return 'message is not modified' in str(e).lower()
 
     def _create_markup(self, scene):
         keyboard = []
@@ -297,11 +312,9 @@ class TextMessage(BaseMessage):
 
         self._messages_ids = message_ids
 
-    def replace(self, scene, new_message):
+    def replace(self, scene, new_message) -> bool:
         if not isinstance(new_message, TextMessage):
-            self.delete(scene)
-            new_message.send(scene)
-            return True
+            return False
 
         new_text = new_message.content
         new_parts = []
@@ -310,9 +323,7 @@ class TextMessage(BaseMessage):
             new_text = new_text[self.MAX_TEXT_LENGTH:]
 
         if len(new_parts) != len(self._messages_ids):
-            self.delete(scene)
-            new_message.send(scene)
-            return True
+            return False
 
         for i, msg_id in enumerate(self._messages_ids):
             reply_markup = new_message._create_markup(scene) if (i == len(new_parts) - 1 and new_message.buttons) else None
@@ -324,8 +335,10 @@ class TextMessage(BaseMessage):
                     text=new_parts[i],
                     reply_markup=reply_markup
                 )
-            except telebot.apihelper.ApiTelegramException:
-                return False
+            except telebot.apihelper.ApiTelegramException as e:
+                if not self._is_not_modified_error(e):
+                    return False
+
         new_message._messages_ids = self._messages_ids
         return True
 
@@ -359,15 +372,11 @@ class MediaMessage(BaseMessage):
 
         self._messages_ids = [msg.message_id]
 
-    def replace(self, scene, new_message):
+    def replace(self, scene, new_message) -> bool:
         if not isinstance(new_message, MediaMessage) or self.type != new_message.type:
-            self.delete(scene)
-            new_message.send(scene)
-            return True
+            return False
 
         try:
-            new_message._messages_ids = self._messages_ids
-
             if isinstance(new_message.content, OpenMedia):
                 content = new_message.content.create_open()
             elif isinstance(new_message.content, MemoryMedia):
@@ -381,21 +390,32 @@ class MediaMessage(BaseMessage):
                 type=self.type,
                 media=content
             )
-            Data.bot.edit_message_media(
-                chat_id=scene.user.id,
-                message_id=new_message._messages_ids[0],
-                media=media
-            )
+
+            try:
+                Data.bot.edit_message_media(
+                    chat_id=scene.user.id,
+                    message_id=self._messages_ids[0],
+                    media=media
+                )
+            except telebot.apihelper.ApiTelegramException as e:
+                if not self._is_not_modified_error(e):
+                    raise
 
             if isinstance(new_message.content, OpenMedia):
                 content.close()
 
             reply_markup = new_message._create_markup(scene) if new_message.buttons else None
-            Data.bot.edit_message_reply_markup(
-                chat_id=scene.user.id,
-                message_id=new_message._messages_ids[0],
-                reply_markup=reply_markup
-            )
+            try:
+                Data.bot.edit_message_reply_markup(
+                    chat_id=scene.user.id,
+                    message_id=self._messages_ids[0],
+                    reply_markup=reply_markup
+                )
+            except telebot.apihelper.ApiTelegramException as e:
+                if not self._is_not_modified_error(e):
+                    raise
+
+            new_message._messages_ids = self._messages_ids
             return True
         except telebot.apihelper.ApiTelegramException:
             return False
@@ -501,10 +521,8 @@ class ContactMessage(BaseMessage):
         )
         self._messages_ids = [msg.message_id]
 
-    def replace(self, scene, new_message):
-        self.delete(scene)
-        new_message.send(scene)
-        return True
+    def replace(self, scene, new_message) -> bool:
+        return False
 
     def to_dict(self) -> Dict[str, Any]:
         json_data = super().to_dict()
@@ -661,7 +679,9 @@ class Scene:
 
         if can_replace_all:
             for old_msg, new_msg in zip(old_messages, new_messages):
-                old_msg.replace(self, new_msg)
+                if not old_msg.replace(self, new_msg):
+                    old_msg.delete(temp)
+                    new_msg.send(self)
         else:
             for old_msg in old_messages:
                 old_msg.delete(temp)
