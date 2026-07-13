@@ -8,10 +8,12 @@ import telebot
 
 from .logger import Log
 from .data import Data
+from .media_caching import FileIdCache
 from . import scenes
 
-def bot_register(bot: telebot.TeleBot):
+def bot_register(bot: telebot.TeleBot, file_id_cache_path: str = "file_id_cache.json", file_id_cache_backup_interval: int = 3600):
     Data.bot = bot
+    FileIdCache(backup_path=file_id_cache_path, backup_interval=file_id_cache_backup_interval)
     register_handlers(bot)
 
 def sql_register(connector=db_attribute.connector.MySQLConnection, *args, **kwargs):

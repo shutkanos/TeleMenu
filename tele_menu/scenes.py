@@ -177,6 +177,10 @@ class OpenMedia:
     def create_open(self):
         return open(file=self.file, mode=self.mode, encoding=self.encoding)
 
+
+from .media_caching import SourceManager, wrap_source, BaseSource, MediaObject, FileIdCache
+
+
 class Button:
     def __init__(self, text: str, action: BaseAction = None):
         self.text = text
@@ -351,6 +355,11 @@ class MediaMessage(BaseMessage):
         reply_markup = self._create_markup(scene) if self.buttons else None
         send_method = getattr(Data.bot, f'send_{self.type}')
 
+        if isinstance(self.content, MediaObject):
+            msg = self._send_via_media_object(self.content, scene.user.id, send_method, reply_markup)
+            self._messages_ids = [msg.message_id]
+            return
+
         if isinstance(self.content, OpenMedia):
             content = self.content.create_open()
         elif isinstance(self.content, MemoryMedia):
@@ -372,13 +381,68 @@ class MediaMessage(BaseMessage):
 
         self._messages_ids = [msg.message_id]
 
+    def _send_via_media_object(self, media_obj: "MediaObject", chat_id, send_method, reply_markup):
+        """
+        Sends a MediaObject, transparently using a cached file_id when available.
+        Falls back to uploading the raw source and re-caching if there is no cache
+        entry yet, or if a previously cached file_id turned out to be invalid.
+        """
+        media_obj.media_type = self.type
+        cache_key = media_obj.get_cache_key() if media_obj.cache_enabled else None
+
+        if cache_key:
+            file_id = FileIdCache().get(self.type, cache_key)
+            if file_id:
+                try:
+                    return send_method(
+                        chat_id=chat_id,
+                        **{self.type: file_id},
+                        reply_markup=reply_markup,
+                        message_effect_id=self.effect_id
+                    )
+                except telebot.apihelper.ApiTelegramException as e:
+                    if not FileIdCache.is_invalid_file_id_error(e):
+                        raise
+                    FileIdCache().remove(self.type, cache_key)
+                    # fall through to raw upload below
+
+        raw = media_obj.open_for_send()
+        msg = send_method(
+            chat_id=chat_id,
+            **{self.type: raw},
+            reply_markup=reply_markup,
+            message_effect_id=self.effect_id
+        )
+        media_obj.source.close_sent(raw)
+
+        if cache_key:
+            file_id = msg.photo[-1].file_id if self.type == "photo" else getattr(msg, self.type).file_id
+            FileIdCache().set(self.type, cache_key, file_id)
+
+        return msg
+
     def replace(self, scene, new_message) -> bool:
         if not isinstance(new_message, MediaMessage) or self.type != new_message.type:
             return False
 
         try:
-            if isinstance(new_message.content, OpenMedia):
+            media_obj = None
+            cache_key = None
+            raw_for_close = None
+
+            if isinstance(new_message.content, MediaObject):
+                media_obj = new_message.content
+                media_obj.media_type = self.type
+                cache_key = media_obj.get_cache_key() if media_obj.cache_enabled else None
+                file_id = FileIdCache().get(self.type, cache_key) if cache_key else None
+                if file_id:
+                    content = file_id
+                else:
+                    content = media_obj.open_for_send()
+                    raw_for_close = content
+            elif isinstance(new_message.content, OpenMedia):
                 content = new_message.content.create_open()
+                raw_for_close = content
             elif isinstance(new_message.content, MemoryMedia):
                 content = new_message.content.get_data(refresh_ttl=True)
                 if content is None:
@@ -391,18 +455,38 @@ class MediaMessage(BaseMessage):
                 media=content
             )
 
+            sent = None
             try:
-                Data.bot.edit_message_media(
+                sent = Data.bot.edit_message_media(
                     chat_id=scene.user.id,
                     message_id=self._messages_ids[0],
                     media=media
                 )
             except telebot.apihelper.ApiTelegramException as e:
-                if not self._is_not_modified_error(e):
+                if media_obj is not None and cache_key and isinstance(content, str) and FileIdCache.is_invalid_file_id_error(e):
+                    FileIdCache().remove(self.type, cache_key)
+                    raw_for_close = media_obj.open_for_send()
+                    media = telebot.types.InputMedia(type=self.type, media=raw_for_close)
+                    sent = Data.bot.edit_message_media(
+                        chat_id=scene.user.id,
+                        message_id=self._messages_ids[0],
+                        media=media
+                    )
+                elif not self._is_not_modified_error(e):
                     raise
 
-            if isinstance(new_message.content, OpenMedia):
-                content.close()
+            if raw_for_close is not None:
+                if media_obj is not None:
+                    media_obj.source.close_sent(raw_for_close)
+                elif hasattr(raw_for_close, 'close'):
+                    try:
+                        raw_for_close.close()
+                    except Exception:
+                        pass
+
+            if media_obj is not None and cache_key and sent is not None:
+                file_id = sent.photo[-1].file_id if self.type == "photo" else getattr(sent, self.type).file_id
+                FileIdCache().set(self.type, cache_key, file_id)
 
             reply_markup = new_message._create_markup(scene) if new_message.buttons else None
             try:
@@ -438,6 +522,8 @@ class MediaMessage(BaseMessage):
             json_data['content'] = content.to_dict()
         elif isinstance(content, MemoryMedia):
             json_data['content'] = content.to_dict()
+        elif isinstance(content, MediaObject):
+            json_data['content'] = content.to_dict()
         else:
             json_data['content'] = content
 
@@ -472,6 +558,8 @@ class MediaMessage(BaseMessage):
                     content = OpenMedia.from_dict(content_data)
                 elif content_type == 'memory':
                     content = MemoryMedia.from_dict(content_data)
+                elif content_type == 'media_object':
+                    content = MediaObject.from_dict(content_data)
                 else:
                     content = content_data
             else:
