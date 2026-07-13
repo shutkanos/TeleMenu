@@ -1,3 +1,3 @@
 pyTelegramBotAPI
 sortedcontainers
-db-attribute
+db-attribute>=2.1.3 # or use pip install git+https://github.com/shutkanos/Db-Attribute

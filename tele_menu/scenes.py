@@ -178,8 +178,6 @@ class OpenMedia:
         return open(file=self.file, mode=self.mode, encoding=self.encoding)
 
 
-from .media_caching import SourceManager, wrap_source, BaseSource, MediaObject, FileIdCache
-
 
 class Button:
     def __init__(self, text: str, action: BaseAction = None):
@@ -355,6 +353,8 @@ class MediaMessage(BaseMessage):
         reply_markup = self._create_markup(scene) if self.buttons else None
         send_method = getattr(Data.bot, f'send_{self.type}')
 
+        from .media_caching import MediaObject
+
         if isinstance(self.content, MediaObject):
             msg = self._send_via_media_object(self.content, scene.user.id, send_method, reply_markup)
             self._messages_ids = [msg.message_id]
@@ -389,6 +389,8 @@ class MediaMessage(BaseMessage):
         """
         media_obj.media_type = self.type
         cache_key = media_obj.get_cache_key() if media_obj.cache_enabled else None
+
+        from .media_caching import FileIdCache
 
         if cache_key:
             file_id = FileIdCache().get(self.type, cache_key)
@@ -429,6 +431,8 @@ class MediaMessage(BaseMessage):
             media_obj = None
             cache_key = None
             raw_for_close = None
+
+            from .media_caching import MediaObject, FileIdCache
 
             if isinstance(new_message.content, MediaObject):
                 media_obj = new_message.content
@@ -506,6 +510,7 @@ class MediaMessage(BaseMessage):
 
     def to_dict(self) -> Dict[str, Any]:
         json_data: Dict[str, Any] = {'type': self.type}
+        from .media_caching import MediaObject
 
         content = self.content
         if content is None:
@@ -543,6 +548,7 @@ class MediaMessage(BaseMessage):
         if content_data is not None:
             if isinstance(content_data, dict) and 'type' in content_data:
                 content_type = content_data['type']
+                from .media_caching import MediaObject
 
                 if content_type == 'str':
                     content = content_data['text']
