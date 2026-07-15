@@ -1,4 +1,4 @@
-import random, json, base64
+import random, json, base64, re
 import traceback, inspect
 from typing import Dict, List, Type, Optional, Any
 from io import BytesIO
@@ -221,12 +221,15 @@ class BaseMessage:
     def send(self, scene):
         raise NotImplementedError
 
-    def delete(self, scene):
-        for msg_id in self._messages_ids:
+    def _delete_message_ids(self, scene, message_ids: List[int]):
+        for msg_id in message_ids:
             try:
                 Data.bot.delete_message(chat_id=scene.user.id, message_id=msg_id)
             except:
                 tele_menu.Log.error(f"error delete message: {traceback.format_exc()}")
+
+    def delete(self, scene):
+        self._delete_message_ids(scene, self._messages_ids)
         self._messages_ids = []
 
     def replace(self, scene, new_message) -> bool:
@@ -287,17 +290,80 @@ class MessageManager(BaseManager):
         action_cls: BaseMessage = cls.get(json_data['type'])
         return action_cls.from_dict(json_data)
 
-
 @MessageManager.decorator_register(type="text")
 class TextMessage(BaseMessage):
     MAX_TEXT_LENGTH = 4096
 
+    @staticmethod
+    def _split_text_into_chunks(text, max_chunk_size):
+        parts = re.split(r'(\n)', text)
+        paragraphs = []
+        for i in range(0, len(parts), 2):
+            if i + 1 < len(parts):
+                paragraphs.append(parts[i] + parts[i + 1])
+            else:
+                paragraphs.append(parts[i])
+
+        chunks = []
+        current_chunk = ''
+        i = 0
+
+        while i < len(paragraphs):
+            paragraph = paragraphs[i]
+
+            if len(current_chunk) + len(paragraph) <= max_chunk_size:
+                current_chunk += paragraph
+                i += 1
+                continue
+
+            if current_chunk and current_chunk.strip() == '':
+                paragraph = current_chunk + paragraph
+                current_chunk = ''
+
+            if current_chunk:
+                chunks.append(current_chunk)
+                current_chunk = ''
+                continue
+
+            if len(paragraph) > max_chunk_size:
+                sentence_parts = re.split(r'([.!?,])', paragraph)
+                sentences = []
+                for j in range(0, len(sentence_parts), 2):
+                    if j + 1 < len(sentence_parts):
+                        sentences.append(sentence_parts[j] + sentence_parts[j + 1])
+                    else:
+                        sentences.append(sentence_parts[j])
+
+                for sentence in sentences:
+                    if len(sentence) > max_chunk_size:
+                        if current_chunk:
+                            chunks.append(current_chunk)
+                            current_chunk = ''
+                        while len(sentence) > max_chunk_size:
+                            chunks.append(sentence[:max_chunk_size])
+                            sentence = sentence[max_chunk_size:]
+                        current_chunk = sentence
+                        continue
+
+                    if len(current_chunk) + len(sentence) <= max_chunk_size:
+                        current_chunk += sentence
+                    else:
+                        if current_chunk:
+                            chunks.append(current_chunk)
+                        current_chunk = sentence
+
+                i += 1
+            else:
+                current_chunk = paragraph
+                i += 1
+
+        if current_chunk:
+            chunks.append(current_chunk)
+
+        return chunks
+
     def send(self, scene):
-        text = self.content
-        parts = []
-        while text:
-            parts.append(text[:self.MAX_TEXT_LENGTH])
-            text = text[self.MAX_TEXT_LENGTH:]
+        parts = self._split_text_into_chunks(self.content, self.MAX_TEXT_LENGTH)
 
         message_ids = []
         for i, part in enumerate(parts):
@@ -318,17 +384,16 @@ class TextMessage(BaseMessage):
         if not isinstance(new_message, TextMessage):
             return False
 
-        new_text = new_message.content
-        new_parts = []
-        while new_text:
-            new_parts.append(new_text[:self.MAX_TEXT_LENGTH])
-            new_text = new_text[self.MAX_TEXT_LENGTH:]
+        new_parts = self._split_text_into_chunks(new_message.content, self.MAX_TEXT_LENGTH)
 
-        if len(new_parts) != len(self._messages_ids):
+        if len(new_parts) > len(self._messages_ids):
             return False
 
-        for i, msg_id in enumerate(self._messages_ids):
-            reply_markup = new_message._create_markup(scene) if (i == len(new_parts) - 1 and new_message.buttons) else None
+        edit_count = len(new_parts)
+
+        for i in range(edit_count):
+            msg_id = self._messages_ids[i]
+            reply_markup = new_message._create_markup(scene) if (i == edit_count - 1 and new_message.buttons) else None
 
             try:
                 Data.bot.edit_message_text(
@@ -341,7 +406,11 @@ class TextMessage(BaseMessage):
                 if not self._is_not_modified_error(e):
                     return False
 
-        new_message._messages_ids = self._messages_ids
+        if len(new_parts) < len(self._messages_ids):
+            extra_ids = self._messages_ids[edit_count:]
+            self._delete_message_ids(scene, extra_ids)
+
+        new_message._messages_ids = self._messages_ids[:edit_count]
         return True
 
 
@@ -765,35 +834,20 @@ class Scene:
 
         n_old = len(old_messages)
         n_new = len(new_messages)
+        n_common = min(n_old, n_new)
 
-        can_replace_all = (n_old == n_new) and all(
-            self._can_replace(old, new)
-            for old, new in zip(old_messages, new_messages)
-        )
+        i = 0
+        while i < n_common:
+            if not old_messages[i].replace(self, new_messages[i]):
+                break
+            i += 1
 
-        if can_replace_all:
-            for old_msg, new_msg in zip(old_messages, new_messages):
-                if not old_msg.replace(self, new_msg):
-                    old_msg.delete(temp)
-                    new_msg.send(self)
-        else:
-            for old_msg in old_messages:
-                old_msg.delete(temp)
-            for new_msg in new_messages:
-                new_msg.send(self)
+        for old_msg in old_messages[i:]:
+            old_msg.delete(temp)
+        for new_msg in new_messages[i:]:
+            new_msg.send(self)
 
         self.user.current_scene = self
-
-    def _can_replace(self, old_msg: BaseMessage, new_msg: BaseMessage) -> bool:
-        if type(old_msg) != type(new_msg):
-            return False
-        if isinstance(old_msg, TextMessage):
-            old_parts = (len(old_msg.content) + TextMessage.MAX_TEXT_LENGTH - 1) // TextMessage.MAX_TEXT_LENGTH
-            new_parts = (len(new_msg.content) + TextMessage.MAX_TEXT_LENGTH - 1) // TextMessage.MAX_TEXT_LENGTH
-            return old_parts == new_parts
-        if isinstance(old_msg, MediaMessage):
-            return old_msg.type == new_msg.type
-        return False
 
     def to_dict(self) -> Dict[str, Any]:
         temp = {
